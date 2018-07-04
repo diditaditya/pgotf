@@ -20,6 +20,7 @@ const app = express();
 app.use(bodyParser.urlencoded({ extended:false }));
 app.use(bodyParser.json());
 
+// map the postgres data types to sequelize data types
 const typeMapper = {
     'integer': 'INTEGER',
     'timestamp': 'DATE',
@@ -27,10 +28,10 @@ const typeMapper = {
     'text': 'TEXT'
 }
 
+// function to generate model
 const generateModel = (tableName, columns) => {
     let fields = {}
     columns.map(col => {
-        // console.log(col, typeMapper[col.data_type]);
         if (col.column_name === 'id') {
             fields.id = { type: Sequelize.INTEGER, primaryKey: true, autoIncrement: true }
         } else if (col.column_name === 'createdat'){
@@ -41,11 +42,12 @@ const generateModel = (tableName, columns) => {
             fields[col.column_name] = Sequelize[typeMapper[col.data_type]];
         }
     }, { timestamp: true });
-    // console.log(fields);
     return sequelize.define(tableName, fields);
 }
 
 app.get('/', (req, res) => res.send('up and running..'));
+
+// to check newly created tables
 app.get('/tables', (req, res) => {
     sequelize.query("SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname != 'pg_catalog' AND schemaname != 'information_schema'")
         .then(data=>res.json(data))
@@ -54,11 +56,14 @@ app.get('/tables', (req, res) => {
             res.send(err);
         });
 });
+
+// select * from table
 app.get('/:tableName', (req, res) => {
     let tableName = req.params.tableName;
+    // model instatiaton should not be here,
+    // better right after creating new table and store new model in some object
     sequelize.query(`SELECT column_name, data_type FROM information_schema.columns WHERE TABLE_NAME = '${tableName}'`)
         .then(data => {
-            // console.log(data[0]);
             let model = generateModel(tableName, data[0]);
             model.findAll()
                 .then(data => {
@@ -69,12 +74,13 @@ app.get('/:tableName', (req, res) => {
                     console.log(err);
                     res.send(err);
                 });
-            // res.send(data);
         }).catch(err => {
             console.log(err);
             res.send(err);
         });
 });
+
+// insert into table
 app.post('/:tableName', (req, res) => {
     let tableName = req.params.tableName;
     sequelize.query(`SELECT column_name, data_type FROM information_schema.columns WHERE TABLE_NAME = '${tableName}'`)
@@ -95,6 +101,8 @@ app.post('/:tableName', (req, res) => {
             res.send(err);
         });
 });
+
+// create new table
 app.post('/table', (req, res) => {
     let tableName = req.body.tableName;
     let dtypes = req.body.dtypes;
