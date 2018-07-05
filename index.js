@@ -1,24 +1,26 @@
 const express = require('express');
 const bodyParser = require('body-parser');
 const Sequelize = require('sequelize');
+require('dotenv').config();
 
-const sequelize = new Sequelize('mydb', 'didit', 'didit', {
-    host: 'localhost',
+// instantiate sequelize
+const sequelize = new Sequelize(process.env.DB_NAME, process.env.DB_USER, process.env.DB_PASS, {
+    host: process.env.DB_HOST,
     dialect: 'postgres'
 });
 
+// test db connection
 sequelize.authenticate()
     .then(()=>console.log('connected to db..'))
     .catch(err=>console.log(err));
 
-const User = sequelize.define('user', {
-    username: Sequelize.STRING,
-    password: Sequelize.STRING
-});
-
+// initialize app and its setting
 const app = express();
 app.use(bodyParser.urlencoded({ extended:false }));
 app.use(bodyParser.json());
+
+// variable to store the models
+let models = {}
 
 // map the postgres data types to sequelize data types
 const typeMapper = {
@@ -45,12 +47,58 @@ const generateModel = (tableName, columns) => {
     return sequelize.define(tableName, fields);
 }
 
+// function to get table columns and then generate the model
+const modelize = (tableName) => {
+    let query = `SELECT column_name, data_type FROM information_schema.columns WHERE TABLE_NAME = '${tableName}'`;
+    return new Promise((resolve, reject) => {
+        sequelize.query(query)
+        .then(data => {
+            let model = generateModel(tableName, data[0]);
+            return resolve(model);
+        })
+        .catch(err => {
+            console.log(err);
+            return reject(err);
+        });
+    });
+}
+
+// modelize all tables found in db
+const initModels = async (models) => {
+    let query = "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname != 'pg_catalog' AND schemaname != 'information_schema'";
+    let tables = [];
+    try {
+        let found = await sequelize.query(query);
+        tables = found[0];
+    } catch (err) {
+        console.log(err);
+    }
+    for (let table of tables) {
+        let newModel = null;
+        try {
+            newModel = await modelize(table.tablename);
+        } catch (err) {
+            console.log(err);
+            return err;
+        }
+        if (newModel !== null) {
+            models[table.tablename] = newModel;
+        }
+    }
+    console.log('done populating models');
+}
+
+// init the app by populating the models with the existing tables
+// better to use some checking mechanism, quit the app when error populating the models
+initModels(models);
+
+// routes
 app.get('/', (req, res) => res.send('up and running..'));
 
-// to check newly created tables
+// to check tables
 app.get('/tables', (req, res) => {
     sequelize.query("SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname != 'pg_catalog' AND schemaname != 'information_schema'")
-        .then(data=>res.json(data))
+        .then(data=>res.json(data[0]))
         .catch(err => {
             console.log(err);
             res.send(err);
@@ -58,48 +106,39 @@ app.get('/tables', (req, res) => {
 });
 
 // select * from table
-app.get('/:tableName', (req, res) => {
+app.get('/get/:tableName', (req, res) => {
     let tableName = req.params.tableName;
-    // model instatiaton should not be here,
-    // better right after creating new table and store new model in some object
-    sequelize.query(`SELECT column_name, data_type FROM information_schema.columns WHERE TABLE_NAME = '${tableName}'`)
-        .then(data => {
-            let model = generateModel(tableName, data[0]);
-            model.findAll()
-                .then(data => {
-                    console.log(data);
-                    res.send(data)
-                })
-                .catch(err => {
-                    console.log(err);
-                    res.send(err);
-                });
-        }).catch(err => {
-            console.log(err);
-            res.send(err);
-        });
+    if (models[tableName]) {
+        let model = models[tableName];
+        model.findAll()
+            .then(data => {
+                res.status(200).send(data);
+            })
+            .catch(err => {
+                console.log(err);
+                res.send(err);
+            });
+    } else {
+        res.status(404).send(`${tableName} not found`);
+    }
 });
 
 // insert into table
-app.post('/:tableName', (req, res) => {
+app.post('/insert/:tableName', (req, res) => {
     let tableName = req.params.tableName;
-    sequelize.query(`SELECT column_name, data_type FROM information_schema.columns WHERE TABLE_NAME = '${tableName}'`)
-        .then(data => {
-            let model = generateModel(tableName, data[0]);
-            model.create(req.body)
-                .then(data => {
-                    console.log(data);
-                    res.send(data)
-                })
-                .catch(err => {
-                    console.log(err);
-                    res.send(err);
-                });
-            // res.send(data);
-        }).catch(err => {
-            console.log(err);
-            res.send(err);
-        });
+    if (models[tableName]) {
+        let model = models[tableName];
+        model.create(req.body)
+            .then(data => {
+                res.status(200).send(data);
+            })
+            .catch(err => {
+                console.log(err);
+                res.send(err);
+            });
+    } else {
+        res.status(400).send(`${tableName} not found`);
+    }
 });
 
 // create new table
@@ -113,13 +152,25 @@ app.post('/table', (req, res) => {
     tableFields.push('createdAt TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP');
     tableFields.push('updatedAt TIMESTAMP WITH TIME ZONE');
 
-    let query = `CREATE TABLE ${tableName} (id SERIAL PRIMARY KEY, ${tableFields.join(', ')});`
+    let query = `CREATE TABLE ${tableName} (id SERIAL PRIMARY KEY, ${tableFields.join(', ')});`;
     sequelize.query(query)
-        .then(data=>res.json(data))
+        .then(data => {
+            modelize(tableName)
+                .then(newModel => {
+                    models[tableName] = newModel;
+                    console.log(models);
+                    res.status(200).send(data);
+                })
+                .catch(err => {
+                    console.log(err);
+                    return err;
+                });
+        })
         .catch(err => {
             console.log(err);
             res.send(err);
         });
 });
 
-app.listen(3000, () => console.log('listening...'));
+let port = process.env.PORT || 3000;
+app.listen(port, () => console.log(`listening to port ${port}...`));
